@@ -1,6 +1,8 @@
 import asyncio
 import random
 from time import time
+import numpy as np
+import soundcard as sc
 from libwavesync import time_machine
 
 
@@ -34,9 +36,6 @@ class ChunkPlayer:
         self.stat_time_drops = 0
         self.stat_output_delays = 0
         self.stat_total_delay = 0
-
-        # Stream
-        self.pyaudio = None
 
         # Used to quit main loop
         self.stop = False
@@ -72,7 +71,6 @@ class ChunkPlayer:
         return silent_chunk
 
     def _open_stream(self):
-        import pyaudio
 
         self.clear_state()
 
@@ -86,33 +84,22 @@ class ChunkPlayer:
             pass
         else:
             assert self.stream is None
-            self.pyaudio = pyaudio.PyAudio()
             if self.device_index is None:
-                config = self.pyaudio.get_host_api_info_by_index(0)
-                device_index = config['defaultOutputDevice']
-                print("Using default output device index", device_index)
+                device = sc.default_speaker()
+                print("Using default output device index", device.__repr__())
             else:
-                device_index = self.device_index
+                device = sc.get_speaker(self.device_index)
 
-            audio_format = (
-                pyaudio.paInt24
-                if cfg.sample == 24
-                else pyaudio.paInt16
-            )
-            stream = self.pyaudio.open(output=True,
-                                       channels=cfg.channels,
-                                       rate=cfg.rate,
-                                       format=audio_format,
-                                       frames_per_buffer=frames_per_buffer,
-                                       output_device_index=device_index)
+            stream = device.player(samplerate=cfg.rate,
+                                   channels=cfg.channels,
+                                   blocksize=frames_per_buffer)
             self.stream = stream
+            self.stream.__enter__()
 
         self.chunk_frames = self.audio_config.chunk_size / cfg.frame_size
 
     def _close_stream(self):
-        self.stream.stop_stream()
-        self.stream.close()
-        self.pyaudio.terminate()
+        self.stream.__exit__()
         self.stream = None
 
 
@@ -220,20 +207,24 @@ class ChunkPlayer:
             # Wait until we can write chunk into output buffer. This might
             # delay us too much - the probabilistic dropping mechanism will kick
             # in.
-            times = 0
-            while True:
-                buffer_space = self.stream.get_write_available()
-                if buffer_space < self.chunk_frames:
-                    self.stat_output_delays += 1
-                    await asyncio.sleep(one_ms)
-                    times += 1
-                    if times > 200:
-                        print("Hey, the output is STUCK!")
-                        await asyncio.sleep(1)
-                        break
-                    continue
-                self.stream.write(chunk)
-                break
+            #times = 0
+            #while True:
+            #    # buffer_space = self.stream.get_write_available()
+            #    buffer_space = self.stream._pulse._pa_stream_writable_size(self.stream.stream)
+            #    if buffer_space < self.chunk_frames:
+            #        self.stat_output_delays += 1
+            #        await asyncio.sleep(one_ms)
+            #        times += 1
+            #        if times > 200:
+            #            print("Hey, the output is STUCK!")
+            #            await asyncio.sleep(1)
+            #            break
+            #        continue
+            #    self.stream.write(chunk)
+            #    break
+            chunk_np = np.fromstring(chunk, dtype=np.int16)
+            chunk_np = chunk_np.reshape((int(self.chunk_frames), -1))
+            self.stream.play(chunk_np.astype(np.float32, order='C') / 32768.0)
 
             # Main status line
             if recent > 200:
@@ -249,13 +240,13 @@ class ChunkPlayer:
                     network_latency = 0
                     network_drops = 0
 
-                s = ("STAT: chunks: q_len=%-3d bs=%4.1f "
+                s = ("STAT: chunks: q_len=%-3d " #bs=%4.1f "
                      "ch/s=%5.1f "
                      "net lat: %-5.1fms "
                      "avg_delay=%-5.2f drops: time=%d net=%d out_delay=%d")
                 s = s % (
                     len(self.chunk_queue.chunk_list),
-                    buffer_space / frames_in_chunk,
+                    #buffer_space / frames_in_chunk,
                     chunks_per_s,
                     1000.0 * network_latency,
                     1000.0 * self.stat_total_delay/cnt,
